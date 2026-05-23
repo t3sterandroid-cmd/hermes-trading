@@ -1,0 +1,7 @@
+config/.env
+config/.keys.enc
+logs/
+reports/
+__pycache__/
+*.pyc
+trading-env/
