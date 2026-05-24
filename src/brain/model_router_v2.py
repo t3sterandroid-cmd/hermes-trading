@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Hermes Trading System - Smart Model Router v2.0
-Automatyczny wybór modelu i providera w zależności od zadania
+Hermes Trading System - Smart Model Router v2.1
+Z API Guard - automatyczna ochrona przed płatnymi wywołaniami
 """
 import os
 import json
@@ -15,18 +15,19 @@ from dotenv import load_dotenv
 load_dotenv("/home/r00t/hermes-trading/config/.env")
 logger = logging.getLogger(__name__)
 
-# === TASK DEFINITIONS ===
-# Każde zadanie ma przypisany priorytet modeli i providerów
+# === API GUARD IMPORT ===
+from src.brain.api_guard import api_guard
 
+# === TASK DEFINITIONS ===
 TASK_CONFIG = {
     "coding": {
         "description": "Pisanie kodu, refactoring, debugowanie",
         "preferred_providers": ["groq", "or", "nvidia"],
         "preferred_models": [
-            "groq/compound-mini",           # Szybki, dobry do kodu
-            "qwen/qwen3-coder:free",        # Specjalizowany w kodowaniu
-            "openai/gpt-oss-120b:free",     # OpenAI coding model
-            "deepseek-ai/deepseek-v4-flash", # DeepSeek coding
+            "groq/compound-mini",
+            "qwen/qwen3-coder:free",
+            "openai/gpt-oss-120b:free",
+            "deepseek-ai/deepseek-v4-flash",
         ],
         "min_context": 32768,
         "needs_tools": True,
@@ -36,9 +37,9 @@ TASK_CONFIG = {
         "description": "Analiza danych, raporty, research",
         "preferred_providers": ["groq", "or", "nvidia"],
         "preferred_models": [
-            "llama-3.3-70b-versatile",      # Szybki, dobry do analizy
-            "deepseek/deepseek-v4-flash:free", # Duży context
-            "nvidia/nemotron-3-super-120b-a12b:free", # Największy context
+            "llama-3.3-70b-versatile",
+            "deepseek/deepseek-v4-flash:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
         ],
         "min_context": 65536,
         "needs_tools": True,
@@ -48,9 +49,9 @@ TASK_CONFIG = {
         "description": "Złożone decyzje, planowanie, strategia",
         "preferred_providers": ["or", "nvidia", "groq"],
         "preferred_models": [
-            "deepseek/deepseek-v4-flash:free", # Najlepszy reasoning
-            "nvidia/nemotron-3-super-120b-a12b:free", # Duży context
-            "llama-3.3-70b-versatile",      # Szybki fallback
+            "deepseek/deepseek-v4-flash:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "llama-3.3-70b-versatile",
         ],
         "min_context": 131072,
         "needs_tools": True,
@@ -60,9 +61,9 @@ TASK_CONFIG = {
         "description": "Proste zadania, odpowiedzi, formatowanie",
         "preferred_providers": ["groq", "or", "nvidia"],
         "preferred_models": [
-            "llama-3.1-8b-instant",         # Najszybszy
-            "groq/compound-mini",           # Szybki
-            "openai/gpt-oss-20b:free",      # Lekki
+            "llama-3.1-8b-instant",
+            "groq/compound-mini",
+            "openai/gpt-oss-20b:free",
         ],
         "min_context": 8192,
         "needs_tools": False,
@@ -72,8 +73,8 @@ TASK_CONFIG = {
         "description": "Analiza sentymentu, newsów, social media",
         "preferred_providers": ["groq", "or"],
         "preferred_models": [
-            "llama-3.3-70b-versatile",      # Dobry do NLP
-            "google/gemma-4-31b-it:free",   # Google NLP
+            "llama-3.3-70b-versatile",
+            "google/gemma-4-31b-it:free",
         ],
         "min_context": 32768,
         "needs_tools": False,
@@ -83,9 +84,9 @@ TASK_CONFIG = {
         "description": "Decyzje tradingowe, sygnały, ryzyko",
         "preferred_providers": ["or", "nvidia", "groq"],
         "preferred_models": [
-            "deepseek/deepseek-v4-flash:free", # Najlepszy do decyzji
-            "nvidia/nemotron-3-super-120b-a12b:free", # Duży context
-            "llama-3.3-70b-versatile",      # Szybki fallback
+            "deepseek/deepseek-v4-flash:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "llama-3.3-70b-versatile",
         ],
         "min_context": 65536,
         "needs_tools": True,
@@ -127,13 +128,10 @@ def is_provider_healthy(provider_id):
         if datetime.now().timestamp() < disabled_until:
             return False
         else:
-            # Reset po czasie
             stats["disabled_until"] = None
             stats["errors"] = 0
     
-    # Max 5 błędów z rzędu
     if stats.get("errors", 0) >= 5:
-        # Wyłącz na 5 minut
         stats["disabled_until"] = datetime.now().timestamp() + 300
         logger.warning(f"Provider {provider_id} wyłączony na 5 minut (5 błędów)")
         return False
@@ -148,7 +146,6 @@ def select_model_for_task(task_type, registry=None):
     
     task = TASK_CONFIG.get(task_type, TASK_CONFIG["reasoning"])
     
-    # 1. Spróbuj preferowane modele w kolejności
     for model_id in task["preferred_models"]:
         for provider_id in task["preferred_providers"]:
             if not is_provider_healthy(provider_id):
@@ -164,62 +161,35 @@ def select_model_for_task(task_type, registry=None):
                                 "provider": provider_id,
                                 "ctx": m["ctx"],
                                 "tools": m.get("tools", False),
-                                "speed": m.get("speed", "medium"),
                             }
     
-    # 2. Fallback: pierwszy dostępny model z preferowanego providera
-    for provider_id in task["preferred_providers"]:
-        if not is_provider_healthy(provider_id):
-            continue
-        
-        models = get_available_models(provider_id, registry)
-        for m in models:
-            if m["ctx"] >= task["min_context"]:
-                if not task["needs_tools"] or m.get("tools", False):
-                    return {
-                        "model": m["id"],
-                        "provider": provider_id,
-                        "ctx": m["ctx"],
-                        "tools": m.get("tools", False),
-                        "speed": m.get("speed", "medium"),
-                    }
-    
-    # 3. Ostatni fallback: jakikolwiek dostępny model
+    # Fallback
     for provider_id in ["groq", "or", "nvidia"]:
         if not is_provider_healthy(provider_id):
             continue
         models = get_available_models(provider_id, registry)
-        if models:
-            m = models[0]
-            return {
-                "model": m["id"],
-                "provider": provider_id,
-                "ctx": m["ctx"],
-                "tools": m.get("tools", False),
-                "speed": m.get("speed", "medium"),
-            }
+        for m in models:
+            return {"model": m["id"], "provider": provider_id, "ctx": m["ctx"], "tools": m.get("tools", False)}
     
     logger.error("Brak dostępnych modeli!")
     return None
 
 
-def record_api_result(provider_id, success, elapsed):
-    """Zapisz wynik wywołania API"""
-    stats = PROVIDER_STATS[provider_id]
-    stats["requests"] += 1
-    stats["total_time"] += elapsed
-    
-    if success:
-        stats["errors"] = 0  # Reset błędów przy sukcesie
-    else:
-        stats["errors"] += 1
-        stats["last_error"] = datetime.now().isoformat()
-
-
 def call_model(model_info, messages, max_tokens=1024, tools=None):
-    """Wywołaj model przez odpowiedniego providera"""
+    """Wywołaj model z ochroną API Guard"""
     provider = model_info["provider"]
     model = model_info["model"]
+    
+    # === API Guard Check ===
+    endpoint_map = {
+        "or": "/v1/chat/completions",
+        "groq": "/openai/v1/chat/completions",
+        "nvidia": "/v1/chat/completions",
+    }
+    endpoint = endpoint_map.get(provider, "/v1/chat/completions")
+    
+    if not api_guard.check_call(provider, endpoint, model):
+        raise PermissionError(f"ZABLOKOWANE: Próba płatnego wywołania {provider}/{model}")
     
     start_time = time.time()
     
@@ -235,13 +205,11 @@ def call_model(model_info, messages, max_tokens=1024, tools=None):
         
         elapsed = time.time() - start_time
         record_api_result(provider, True, elapsed)
-        
         return result
         
     except Exception as e:
         elapsed = time.time() - start_time
         record_api_result(provider, False, elapsed)
-        logger.error(f"Błąd {provider}/{model}: {e}")
         raise
 
 
@@ -293,12 +261,16 @@ def _call_nvidia(model, messages, max_tokens):
     return data["choices"][0]["message"]
 
 
-def get_provider_stats():
-    """Pobierz statystyki providerów"""
-    return PROVIDER_STATS
+def record_api_result(provider, success, elapsed):
+    """Zapisz wynik wywołania API"""
+    PROVIDER_STATS[provider]["requests"] += 1
+    PROVIDER_STATS[provider]["total_time"] += elapsed
+    if success:
+        PROVIDER_STATS[provider]["errors"] = 0
+    else:
+        PROVIDER_STATS[provider]["errors"] += 1
+        PROVIDER_STATS[provider]["last_error"] = datetime.now().isoformat()
 
-
-# === CONVENIENCE FUNCTIONS ===
 
 def ask(task_type, prompt, max_tokens=1024, tools=None):
     """Wygodna funkcja: zadaj pytanie z automatycznym wyborem modelu"""
@@ -313,46 +285,11 @@ def ask(task_type, prompt, max_tokens=1024, tools=None):
 
 
 def get_model(task_type="reasoning"):
-    """Pobierz info o modelu dla zadania (kompatybilność z v1)"""
+    """Pobierz info o modelu dla zadania"""
     registry = load_model_registry()
     return select_model_for_task(task_type, registry)
 
 
-# === GLOBAL INSTANCE ===
-router = type('obj', (object,), {
-    'get_model': get_model,
-    'ask': ask,
-    'get_stats': get_provider_stats,
-})()
-
-
-if __name__ == "__main__":
-    import sys
-    logging.basicConfig(level=logging.INFO)
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        print("=== Smart Model Router v2.0 Test ===\n")
-        
-        for task in TASK_CONFIG:
-            model = get_model(task)
-            if model:
-                print(f"{task:12s} -> {model['model']:50s} ({model['provider']})")
-        
-        print("\n=== Provider Stats ===")
-        for pid, stats in PROVIDER_STATS.items():
-            print(f"  {pid}: {stats['requests']} req, {stats['errors']} err")
-    
-    elif len(sys.argv) > 1 and sys.argv[1] == "ask":
-        task = sys.argv[2] if len(sys.argv) > 2 else "reasoning"
-        prompt = " ".join(sys.argv[3:]) if len(sys.argv) > 3 else "Hello, how are you?"
-        
-        print(f"Task: {task}")
-        print(f"Prompt: {prompt}")
-        
-        response = ask(task, prompt)
-        print(f"\nResponse: {response.get('content', response)}")
-    
-    else:
-        print("Użycie:")
-        print("  python model_router.py test")
-        print("  python model_router.py ask <task> <prompt>")
+def get_provider_stats():
+    """Pobierz statystyki providerów"""
+    return {**PROVIDER_STATS, "api_guard": api_guard.get_stats()}
